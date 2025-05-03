@@ -1,66 +1,156 @@
-// frameForger.cc
 #include "frameForger.hh"
 
+#include <sys/mman.h>
+
+#include <csignal>
+#include <cstring>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+#include "frameTypes.hh"
+
 /**
- * Global flag for graceful termination of the capture process.
- * Set to 0 by signal handlers to indicate that the application should stop.
- * @see signalHandler
+ * @brief Global flag indicating if the program should continue running
+ *
+ * @details This flag is modified by the signal handler to gracefully
+ * terminate the program when a termination signal is received.
  */
 volatile sig_atomic_t running = 1;
 
 /**
- * @brief Signal handler for graceful termination of the application.
+ * @brief Signal handler for graceful termination
  *
- * @details This function is registered as a handler for SIGINT and SIGTERM
- * signals. When these signals are received, it sets the global 'running' flag
- * to 0, allowing the main loop to exit cleanly.
+ * @param sig Signal number (unused but required for signal handler signature)
  *
- * @param signal The signal number that was received (e.g., SIGINT or SIGTERM).
- *
- * @see running
+ * @details Sets the running flag to 0, signaling the main loop to exit cleanly.
  */
-void signalHandler(int signal) {
-  if (signal == SIGINT || signal == SIGTERM) {
-    running = 0;
-  }
-}
+void signalHandler(int /*sig*/) { running = 0; }
 
 /**
- * @brief Constructs a new FrameForger object with initialized camera manager.
+ * @brief Constructs a FrameForger object with the specified RGB buffer
  *
- * @details Creates a camera manager instance using smart pointers to ensure
- * proper resource cleanup. The buffer allocator is initialized to nullptr and
- * will be created during the initialization process.
+ * @param rgbBuffer Reference to the ring buffer that will store processed
+ * frames
  *
- * @note This constructor does not start the camera manager or acquire any
- * cameras. The initialize() method must be called to complete the setup
- * process.
- *
- * @see initialize()
+ * @details Initializes the camera manager and stores a reference to the
+ * external ring buffer. The camera is not yet initialized or started at this
+ * point.
  */
-FrameForger::FrameForger()
+FrameForger::FrameForger(RingMaster<Frame>& rgbBuffer)
     : cameraManager_(std::make_unique<libcamera::CameraManager>()),
-      bufferAllocator_(nullptr) {}
+      bufferAllocator_(nullptr),
+      rgbBuffer_(rgbBuffer) {}
 
 /**
- * @brief Destroys the FrameForger instance, releasing all associated resources.
+ * @brief Destructor that ensures proper cleanup of all resources
  *
- * @details Performs a clean shutdown sequence by stopping any active capture
- * session and cleaning up all allocated resources, including:
- * - Memory mappings for frame buffers
- * - Camera resources
- * - Buffer allocator
- * - Camera manager
- *
- * This ensures that all hardware resources are properly released, preventing
- * resource leaks and allowing other applications to access the camera.
- *
- * @see stopCapture()
- * @see cleanup()
+ * @details Stops any active capture and performs comprehensive cleanup
+ * of all allocated resources to prevent leaks.
  */
 FrameForger::~FrameForger() {
   stopCapture();
   cleanup();
+}
+
+/**
+ * @brief Retrieves the next available frame from the frame buffer
+ *
+ * @param frame Reference to a Frame object that will be filled with the next
+ * frame data
+ * @return true if a frame was retrieved, false if capture was stopped before a
+ * frame became available
+ *
+ * @details This method blocks until either:
+ * - A new frame becomes available in the buffer
+ * - The capture process is stopped
+ *
+ * It uses a yield/sleep mechanism to avoid consuming CPU resources while
+ * waiting.
+ */
+bool FrameForger::getNextFrame(Frame& frame) {
+  // Block until a frame is available or capture stops
+  while (capturing_.load()) {
+    if (rgbBuffer_.pop(frame)) return true;
+    std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+  return false;
+}
+
+/**
+ * @brief Processes a completed frame capture request
+ *
+ * @param request Pointer to the completed request
+ *
+ * @details This method is called by libcamera when a frame capture is complete.
+ * It processes the captured frame data by:
+ * 1. Checking if the request was cancelled
+ * 2. Locating the frame buffer for the configured stream
+ * 3. Copying frame data from mapped memory to a Frame object
+ * 4. Adding metadata like timestamp and sequence number
+ * 5. Pushing the frame to the output ring buffer
+ * 6. Recycling the request for continuous capture
+ *
+ * The method handles memory mapping and proper buffer management to maintain
+ * continuous frame capture.
+ */
+void FrameForger::requestComplete(libcamera::Request* request) {
+  if (request->status() == libcamera::Request::RequestCancelled) return;
+
+  // Locate the FrameBuffer for our stream:
+  auto const& bufs = request->buffers();
+  auto it = bufs.find(stream_);
+  if (it == bufs.end()) return;
+  libcamera::FrameBuffer* fb = it->second;
+
+  // Build our shared Frame
+  Frame frame;
+  frame.rawData.resize(frameSize_);
+  size_t copied = 0;
+  for (auto& plane : fb->planes()) {
+    int fd = plane.fd.get();
+    auto mapIt = fdMappings_.find(fd);
+    if (mapIt == fdMappings_.end()) continue;
+    uint8_t* src = static_cast<uint8_t*>(mapIt->second.first) + plane.offset;
+    size_t toCopy = std::min<size_t>(plane.length, frameSize_ - copied);
+    std::memcpy(frame.rawData.data() + copied, src, toCopy);
+    copied += toCopy;
+  }
+
+  // Fill metadata
+  auto ts = request->metadata().get(libcamera::controls::SensorTimestamp);
+  if (ts) frame.timestamp = std::chrono::microseconds(*ts);
+  frame.width = width_;
+  frame.height = height_;
+  // Sequence ID
+  frame.sequenceNumber = seqCounter_++;
+
+  // Push into the external ring, back off if full
+  while (!rgbBuffer_.push(std::move(frame))) {
+    std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::microseconds(20));
+  }
+
+  // Reuse & requeue
+  request->reuse();
+  if (request->addBuffer(stream_, fb) < 0) return;
+  camera_->queueRequest(request);
+}
+
+/**
+ * @brief Static callback function for libcamera request completion
+ *
+ * @param request Pointer to the completed request
+ * @param user_data Pointer to the FrameForger instance
+ *
+ * @details Static bridge function that routes callbacks to the appropriate
+ * object instance. This function is necessary because libcamera requires a
+ * static callback function.
+ */
+void FrameForger::requestCallback(libcamera::Request* request,
+                                  void* user_data) {
+  static_cast<FrameForger*>(user_data)->requestComplete(request);
 }
 
 /**
@@ -184,7 +274,9 @@ int FrameForger::configureStream() {
 
   auto& streamConfig = cameraConfig_->at(0);
   streamConfig.size = {640, 480};
-  streamConfig.pixelFormat = libcamera::formats::RGB888;
+  width_ = streamConfig.size.width;
+  height_ = streamConfig.size.height;
+  streamConfig.pixelFormat = libcamera::formats::BGR888;
 
   // Validate and apply configuration
   if (cameraConfig_->validate() == libcamera::CameraConfiguration::Invalid) {
@@ -298,209 +390,56 @@ int FrameForger::createRequests() {
 }
 
 /**
- * @brief Starts the frame capture process.
+ * @brief Starts the continuous frame capture process
  *
- * @details This method begins the continuous frame capture process:
- * 1. Verifies that capture is not already active
- * 2. Connects the requestCompleted signal to the request handler
+ * @return ErrorCode indicating success or failure
+ *
+ * @details This method:
+ * 1. Checks if capture is already active
+ * 2. Connects the frame completion callback
  * 3. Starts the camera hardware
- * 4. Queues all prepared requests to begin frame capture
+ * 4. Queues all capture requests to begin continuous capture
+ * 5. Sets the capturing flag to true
  *
- * Once started, the camera will continuously capture frames until
- * stopCapture() is called or the object is destroyed.
+ * Once started, frames will be continuously captured and processed until
+ * stopCapture() is called.
  *
- * @return ErrorCode::SUCCESS if capture starts successfully,
- *         ERR_CAMERA_START if starting the camera fails,
- *         ERR_QUEUE_REQUEST if queueing requests fails
- *
- * @see requestComplete()
  * @see libcamera::Camera::start()
  * @see libcamera::Camera::queueRequest()
  */
 int FrameForger::startCapture() {
-  if (capturing_) return ErrorCode::SUCCESS;
+  if (capturing_.load()) return ErrorCode::SUCCESS;
 
-  camera_->requestCompleted.connect(
-      this, [this](libcamera::Request* req) { this->requestComplete(req); });
+  // Connect the libcamera signal to our member callback
+  camera_->requestCompleted.connect(this, &FrameForger::requestComplete);
 
-  if (camera_->start()) {
-    std::cerr << "Failed to start camera" << std::endl;
-    return ErrorCode::ERR_CAMERA_START;
-  }
+  if (camera_->start()) return ErrorCode::ERR_CAMERA_START;
 
-  for (auto& request : requests_) {
-    if (camera_->queueRequest(request.get()) < 0) {
-      std::cerr << "Failed to queue request" << std::endl;
+  for (auto& req : requests_) {
+    if (camera_->queueRequest(req.get()) < 0)
       return ErrorCode::ERR_QUEUE_REQUEST;
-    }
   }
 
-  capturing_ = true;
+  capturing_.store(true);
   return ErrorCode::SUCCESS;
 }
 
 /**
- * @brief Stops the frame capture process.
+ * @brief Stops the frame capture process
  *
- * @details This method halts the continuous frame capture:
- * 1. Verifies that capture is currently active
+ * @details This method:
+ * 1. Atomically sets the capturing flag to false
  * 2. Stops the camera hardware
- * 3. Sets the capturing flag to false
- * 4. Clears the completed requests queue
- * 5. Clears all pending requests
+ * 3. Clears all capture requests
  *
- * After stopping, any frames already in the frame buffer remain
- * available for retrieval.
+ * The method is safe to call even if capture is not active.
  *
- * @see startCapture()
  * @see libcamera::Camera::stop()
  */
 void FrameForger::stopCapture() {
-  if (!capturing_) return;
-
+  if (!capturing_.exchange(false)) return;
   camera_->stop();
-  capturing_ = false;
-
-  {
-    std::lock_guard<std::mutex> lock(requestMutex_);
-    while (!completedRequests_.empty()) {
-      completedRequests_.pop();
-    }
-  }
-
   requests_.clear();
-}
-
-/**
- * @brief Retrieves the next available frame from the internal queue.
- *
- * @details This method provides the primary mechanism for consuming captured
- * frames:
- * 1. Acquires a lock on the frame buffer mutex
- * 2. Checks if any frames are available
- * 3. If available, moves the oldest frame to the output parameter
- * 4. Removes the frame from the queue
- *
- * This method is thread-safe and can be called from multiple threads.
- *
- * @param[out] frame Reference to a Frame structure to receive the frame data
- *
- * @return true if a frame was successfully retrieved, false if no frames were
- * available
- *
- * @note This method does not block when no frames are available.
- *
- * @see Frame
- */
-bool FrameForger::getNextFrame(Frame& frame) {
-  std::lock_guard<std::mutex> lock(frameBufferMutex_);
-  if (frameBuffer_.empty()) return false;
-
-  frame = std::move(frameBuffer_.front());
-  frameBuffer_.pop();
-  return true;
-}
-
-/**
- * @brief Processes a completed capture request and prepares the next one.
- *
- * @details This callback function is invoked when a capture request completes:
- * 1. Checks if the request was cancelled
- * 2. Retrieves the frame buffer from the request
- * 3. Copies frame data from mapped memory to the frame buffer
- * 4. Extracts metadata such as timestamp
- * 5. Places the complete frame in the frame buffer queue
- * 6. Reuses the request for continuous capture
- * 7. Requeues the request with the camera
- *
- * This implements a continuous capture loop where each completed request
- * is immediately reused and requeued.
- *
- * @param request Pointer to the completed capture request
- *
- * @see libcamera::Request
- * @see Frame
- * @see libcamera::Camera::queueRequest()
- */
-void FrameForger::requestComplete(libcamera::Request* request) {
-  if (request->status() == libcamera::Request::RequestCancelled) return;
-
-  auto const& buffers = request->buffers();
-  auto itr = buffers.find(stream_);
-  if (itr == buffers.end()) {
-    std::cerr << "No buffer for stream!" << std::endl;
-    return;
-  }
-  libcamera::FrameBuffer* fb = itr->second;
-
-  // Prepare frame data
-  Frame frame;
-  frame.data.resize(frameSize_);
-  size_t copied = 0;
-
-  // Copy data from mapped memory
-  for (const auto& plane : fb->planes()) {
-    int fd = plane.fd.get();
-    auto mapping = fdMappings_.find(fd);
-    if (mapping == fdMappings_.end()) {
-      std::cerr << "No mapping for FD " << fd << std::endl;
-      continue;
-    }
-
-    uint8_t* src = static_cast<uint8_t*>(mapping->second.first) + plane.offset;
-    size_t toCopy =
-        std::min(static_cast<size_t>(plane.length), frameSize_ - copied);
-    std::memcpy(frame.data.data() + copied, src, toCopy);
-    copied += toCopy;
-  }
-
-  // Get the timestamp from metadata
-  auto ts = request->metadata().get(libcamera::controls::SensorTimestamp);
-  if (ts) frame.metadata.timestamp = std::chrono::microseconds(*ts);
-
-  // Store in queue
-  {
-    std::lock_guard<std::mutex> lock(frameBufferMutex_);
-    frameBuffer_.push(std::move(frame));
-  }
-  frameBufferCv_.notify_one();
-
-  // Reuse request and re-add buffer
-  request->reuse();
-  if (request->addBuffer(stream_, fb) < 0) {
-    std::cerr << "Failed to add buffer to reused request" << std::endl;
-    return;
-  }
-
-  // Requeue request with proper error checking
-  if (camera_->queueRequest(request) < 0) {
-    std::cerr << "Failed to requeue request" << std::endl;
-    return;
-  }
-
-  // Existing queue management...
-  std::lock_guard<std::mutex> lock(requestMutex_);
-  completedRequests_.push(request);
-  requestCv_.notify_one();
-}
-
-/**
- * @brief Static callback wrapper for request completion.
- *
- * @details This static function adapts between libcamera's callback system
- * and the object-oriented design of FrameForger. It retrieves the FrameForger
- * instance from the user_data pointer and forwards the request to the
- * instance's requestComplete method.
- *
- * @param request Pointer to the completed capture request
- * @param userData Pointer to the FrameForger instance (cast to void*)
- *
- * @see requestComplete()
- * @see libcamera::Signal
- */
-void FrameForger::requestCallback(libcamera::Request* request, void* userData) {
-  FrameForger* self = static_cast<FrameForger*>(userData);
-  self->requestComplete(request);
 }
 
 /**
@@ -520,23 +459,15 @@ void FrameForger::requestCallback(libcamera::Request* request, void* userData) {
  * @see munmap()
  */
 void FrameForger::cleanup() {
-  // Unmap all memory
+  // Unmap all MMAPed buffers
   for (auto& [fd, mapping] : fdMappings_) {
     munmap(mapping.first, mapping.second);
   }
   fdMappings_.clear();
 
-  // Clear frame buffer - Implemented direct clear
-  {
-    std::lock_guard<std::mutex> lock(frameBufferMutex_);
-    std::queue<Frame> empty;
-    std::swap(frameBuffer_, empty);
-  }
-
+  // Release camera and stop manager
   releaseCamera();
-  if (cameraManager_) {
-    cameraManager_->stop();
-  }
+  if (cameraManager_) cameraManager_->stop();
 }
 
 /**
@@ -557,108 +488,4 @@ void FrameForger::releaseCamera() {
     camera_->release();
     cameraAcquired_ = false;
   }
-}
-
-/**
- * @brief Main function demonstrating FrameForger usage.
- *
- * @details This function provides a complete example of using the FrameForger
- * class:
- * 1. Sets up signal handlers for graceful termination
- * 2. Creates and initializes a FrameForger instance
- * 3. Starts frame capture
- * 4. Processes frames in a loop until interrupted
- * 5. For each frame, displays metadata and basic statistics
- * 6. Stops capture and cleans up when interrupted
- *
- * @return 0 on successful completion, or an error code on failure
- *
- * @see FrameForger::initialize()
- * @see FrameForger::startCapture()
- * @see FrameForger::getNextFrame()
- * @see FrameForger::stopCapture()
- */
-int main() {
-  // Set up signal handling for graceful termination
-  std::signal(SIGINT, signalHandler);
-  std::signal(SIGTERM, signalHandler);
-
-  std::cout << "Starting FrameForger demo..." << std::endl;
-
-  // Initialize FrameForger
-  FrameForger forger;
-  int result = forger.initialize();
-  if (result != FrameForger::ErrorCode::SUCCESS) {
-    std::cerr << "Failed to initialize FrameForger: error code " << result
-              << std::endl;
-    return result;
-  }
-
-  // Start capturing frames
-  result = forger.startCapture();
-  if (result != FrameForger::ErrorCode::SUCCESS) {
-    std::cerr << "Failed to start capture: error code " << result << std::endl;
-    return result;
-  }
-
-  std::cout << "Capture started successfully. Press Ctrl+C to exit."
-            << std::endl;
-  std::cout << "---------------------------------------------------"
-            << std::endl;
-
-  // Frame counter
-  unsigned int frameCount = 0;
-
-  // Process frames until interrupted
-  while (running) {
-    FrameForger::Frame frame;
-    if (forger.getNextFrame(frame)) {
-      frameCount++;
-
-      // Print frame metadata
-      std::cout << "Frame #" << std::setw(6) << std::setfill('0') << frameCount
-                << std::endl;
-      std::cout << "  Timestamp: " << frame.metadata.timestamp.count() << " μs"
-                << std::endl;
-      std::cout << "  Data size: " << frame.data.size() << " bytes"
-                << std::endl;
-
-      // Calculate and print basic frame statistics
-      if (!frame.data.empty()) {
-        // Calculate average pixel intensity (simple metric)
-        uint64_t sum = 0;
-        for (const auto& byte : frame.data) {
-          sum += byte;
-        }
-        double average = static_cast<double>(sum) / frame.data.size();
-
-        std::cout << "  Average intensity: " << std::fixed
-                  << std::setprecision(2) << average << std::endl;
-
-        // Print first few RGB values as a sample
-        std::cout << "  Sample RGB values (first 3 pixels): ";
-        for (size_t i = 0; i < 9 && i < frame.data.size(); i += 3) {
-          if (i > 0) std::cout << ", ";
-          std::cout << "(" << static_cast<int>(frame.data[i]) << ","
-                    << static_cast<int>(frame.data[i + 1]) << ","
-                    << static_cast<int>(frame.data[i + 2]) << ")";
-        }
-        std::cout << std::endl;
-      }
-
-      std::cout << "---------------------------------------------------"
-                << std::endl;
-    } else {
-      // No frame available, sleep a bit to prevent CPU spinning
-      std::this_thread::sleep_for(std::chrono::milliseconds(16));  // ~60 fps
-    }
-  }
-
-  std::cout << "Capture stopped. Processed " << frameCount << " frames."
-            << std::endl;
-
-  // Stop capture and clean up
-  forger.stopCapture();
-
-  return 0;
 }
