@@ -88,7 +88,7 @@ class PacketPulse {
    * @throws std::runtime_error if network socket creation or configuration
    * fails
    */
-  PacketPulse(RingMaster<FrameType>& frameBuffer, std::string_view destIp,
+  PacketPulse(RingMaster<FrameType>& frameBuffer, const std::string& destIp,
               uint16_t destPort, uint16_t width, uint16_t height,
               uint8_t quality, uint_fast8_t payloadType = 96,
               uint_fast16_t ssrc = 0, uint_fast16_t clockRate = 90000,
@@ -146,8 +146,8 @@ class PacketPulse {
    * error)
    * @throws std::runtime_error if file cannot be opened for writing
    */
-  bool writeSDP(std::string_view filePath, std::string_view sessionName,
-                std::string_view sourceIp, uint64_t sessionId = 0) const;
+  bool writeSDP(const std::string& filePath, const std::string& sessionName,
+                const std::string& sourceIp, uint64_t sessionId = 0) const;
 
  private:
   /**
@@ -172,7 +172,7 @@ class PacketPulse {
    * @param destPort  UDP port number
    * @throws std::runtime_error if any network operation fails
    */
-  void setupNetwork(std::string_view destIp, uint16_t destPort);
+  void setupNetwork(const std::string& destIp, uint16_t destPort);
 
   /**
    * @brief Assemble RTP header in-place
@@ -240,9 +240,10 @@ class PacketPulse {
 
 template <typename FrameType>
 PacketPulse<FrameType>::PacketPulse(RingMaster<FrameType>& frameBuffer,
-                                    std::string_view destIp, uint16_t destPort,
-                                    uint16_t width, uint16_t height,
-                                    uint8_t quality, uint_fast8_t payloadType,
+                                    const std::string& destIp,
+                                    uint16_t destPort, uint16_t width,
+                                    uint16_t height, uint8_t quality,
+                                    uint_fast8_t payloadType,
                                     uint_fast16_t ssrc, uint_fast16_t clockRate,
                                     uint8_t framerate)
     : frameBuffer_(frameBuffer),
@@ -358,9 +359,9 @@ std::string PacketPulse<FrameType>::generateSDP(const std::string& sessionName,
 }
 
 template <typename FrameType>
-bool PacketPulse<FrameType>::writeSDP(std::string_view filePath,
-                                      std::string_view sessionName,
-                                      std::string_view sourceIp,
+bool PacketPulse<FrameType>::writeSDP(const std::string& filePath,
+                                      const std::string& sessionName,
+                                      const std::string& sourceIp,
                                       uint64_t sessionId) const {
   try {
     std::ofstream sdpFile(filePath, std::ios::out | std::ios::trunc);
@@ -469,7 +470,7 @@ void PacketPulse<FrameType>::streamingLoop() {
 }
 
 template <typename FrameType>
-void PacketPulse<FrameType>::setupNetwork(std::string_view destIp,
+void PacketPulse<FrameType>::setupNetwork(const std::string& destIp,
                                           uint16_t destPort) {
   // Create UDP socket
   udpSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
