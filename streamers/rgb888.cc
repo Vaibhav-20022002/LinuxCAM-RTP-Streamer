@@ -5,7 +5,7 @@
 #include <iostream>
 #include <string_view>
 
-#include "FrameForger/frameTypes.hh"
+#include "FraframeTypes.hh"
 #include "frameForger.hh"
 #include "packetPulse.hh"
 #include "ringMaster.hh"
