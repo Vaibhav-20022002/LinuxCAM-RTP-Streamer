@@ -45,3 +45,6 @@
 *.jpg
 *.png
 
+# Vs code folder
+.vscode
+
