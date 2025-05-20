@@ -6,9 +6,6 @@
  * This header provides the TurboSnap class, a background threaded converter
  * that fetches raw RGB frames from an input queue, compresses them to JPEG, and
  * dispatches them into an output queue.
- *
- * @author
- *     Generated and documented by OpenAI's ChatGPT, April 2025.
  */
 
 #include <turbojpeg.h> /**< TurboJPEG library providing high-performance JPEG compression/decompression APIs */
@@ -205,4 +202,3 @@ void TurboSnap<IN_QUE, OUT_QUE>::conversionLoop_() {
     }
   }
 }
-
