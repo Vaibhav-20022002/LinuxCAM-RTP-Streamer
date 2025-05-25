@@ -3,6 +3,7 @@
 # -------------------------------------------------------------------
 # Base style and general layout
 # -------------------------------------------------------------------
+Cpp11BracedListStyle:           true
 BasedOnStyle:                         LLVM    # start from LLVM
 IndentWidth:                          2       # 2 spaces per indent
 TabWidth:                             2       # if ever tabs allowed
@@ -42,7 +43,12 @@ ContinuationIndentWidth: 4         # indent for continuations
 # -------------------------------------------------------------------
 SpaceBeforeParens:                ControlStatements    # `if (` not `if(`
 SpaceInEmptyParentheses:          false
-# SpaceInParentheses:               false
+SpacesInParens:                   Custom
+SpacesInParensOptions:
+  InConditionalStatements: false
+  InCStyleCasts:           false
+  InEmptyParentheses:      false
+  Other:                   false
 SpacesInAngles:                   false
 SpacesInCStyleCastParentheses:    false
 SpacesInContainerLiterals:        false
