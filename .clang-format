@@ -42,7 +42,7 @@ ContinuationIndentWidth: 4         # indent for continuations
 # -------------------------------------------------------------------
 SpaceBeforeParens:                ControlStatements    # `if (` not `if(`
 SpaceInEmptyParentheses:          false
-SpaceInParentheses:               false
+# SpaceInParentheses:               false
 SpacesInAngles:                   false
 SpacesInCStyleCastParentheses:    false
 SpacesInContainerLiterals:        false
@@ -57,7 +57,7 @@ PointerAlignment:                 Right               # `int* p` vs `int *p`
 # -------------------------------------------------------------------
 # Alignment — when to align things into columns
 # -------------------------------------------------------------------
-AlignConsecutiveAssignments:    true`
+AlignConsecutiveAssignments:    true
 AlignConsecutiveDeclarations:   true
 AlignEscapedNewlines:           Left
 AlignOperands:                  false
@@ -83,7 +83,7 @@ PenaltyReturnTypeOnItsOwnLine:              60
 # C++ specific
 # -------------------------------------------------------------------
 DerivePointerAlignment:                     false
-ExperimentalAutoDetectBinPackedArguments:   false
+# ExperimentalAutoDetectBinPackedArguments:   false
 IncludeBlocks:                              Regroup
 IncludeCategories:
   - Regex:           '^<.*\.h>'
@@ -91,7 +91,7 @@ IncludeCategories:
   - Regex:           '^".*\.h"'
     Priority:        2
 SortIncludes:                               true
-Standard:                                   Cpp20
+Standard:                                   Cpp11
 
 # -------------------------------------------------------------------
 # Other languages / files
@@ -112,9 +112,9 @@ EmptyLineBeforeAccessModifier:  Leave
 # -------------------------------------------------------------------
 # For C files, you might want .clang-format to detect C
 # and use C11 standard:
-# ---  
+# ---
 # FileName:           '*.c'
 # Language:           C
 # Standard:           C11
-# ---  
+# ---
 
