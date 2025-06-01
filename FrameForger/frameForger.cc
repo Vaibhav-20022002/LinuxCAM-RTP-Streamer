@@ -1,3 +1,5 @@
+#pragma once
+
 #include "frameForger.hh"
 
 #include <sys/mman.h>

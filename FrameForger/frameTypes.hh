@@ -22,3 +22,14 @@ struct jpegFrame_ {
   size_t jpegSize;
   uint64_t frameNumber;
 };
+
+/**
+ * @brief MJPEG frame with metadata
+ */
+struct MjpegFrame {
+  std::vector<uint8_t> jpegData;          /**< Compressed JPEG data */
+  uint32_t width;                         /**< Frame width in pixels */
+  uint32_t height;                        /**< Frame height in pixels */
+  uint64_t sequenceNumber;                /**< Unique frame sequence number */
+  std::chrono::microseconds timestamp;    /**< Timestamp of capture */
+};
