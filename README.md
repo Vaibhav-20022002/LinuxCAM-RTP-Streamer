@@ -12,9 +12,9 @@
 
 ## ⚠️ Project Status
 
-```text
-⚠️ Heads up: This version is a total dumpster fire - doesn’t work at all. But you’ve still got 99% (.99?) of the units up and running. Will fix in the next version hopefully, with more optimisations. ¯\\(ツ)/¯
-```
+
+> ⚠️ Heads up: This version is a total dumpster fire - doesn’t work at all. But you’ve still got 99% (.99?) of the units up and running. Will fix in the next version hopefully, with more optimisations. ¯\\(ツ)/¯
+
 
 ---
 
