@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <sys/time.h>
 
 // ************************* LOGS *************************
 
@@ -19,3 +20,10 @@
 #define ERR_CHAR1(code) char(((code) >> 8) & 0xFF)
 #define ERR_CHAR2(code) char(((code) >> 16) & 0xFF)
 #define ERR_CHAR3(code) char(((code) >> 24) & 0xFF)
+
+// ************************* Frame *************************
+typedef struct {
+  void          *start;     // Pointer to the frame data
+  size_t         length;    // Total size of the frame
+  struct timeval timestamp; // Capture timestamp
+} Frame;
