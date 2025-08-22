@@ -1,6 +1,7 @@
 #include "frameForger.hh"
 
 #include <csignal> // For sig_atomic_t
+#include <cstdint>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdexcept> // For std::runtime_error
@@ -14,12 +15,16 @@ extern volatile sig_atomic_t g_sigint_received;
 
 // All initialization is performed here. If any step fails, an exception is thrown,
 // and the object is not constructed, preventing use of a partially-initialized object.
-FrameForger::FrameForger(std::string_view devicePath, uint32_t w, uint32_t h, uint32_t format)
+FrameForger::FrameForger(std::string_view devicePath,
+        uint32_t                          w,
+        uint32_t                          h,
+        uint32_t                          format,
+        uint32_t                          fps)
     : width(w)
     , height(h) {
   // The order of these calls is critical for correct V4L2 setup.
   openDevice(devicePath);
-  initializeDevice(format);
+  initializeDevice(format, fps);
   initializeBuffers(); // Allocate and map buffers
 }
 
@@ -180,18 +185,18 @@ void FrameForger::streamingLoop(std::function<void(Frame &&)> frameHandler) {
       //    without copying the data structure.
       try {
         // Log frame metadata before passing to handler
-        INFO_MSG("Frame Metadata:");
-        INFO_MSG("  - Buffer Index: %u", buff.index);
-        INFO_MSG("  - Size: %u bytes", buff.bytesused);
-        INFO_MSG("  - Timestamp: %ld.%06ld sec", buff.timestamp.tv_sec, buff.timestamp.tv_usec);
-        INFO_MSG("  - Sequence: %u", buff.sequence);
-        INFO_MSG("  - Flags: %s%s%s",
-            (buff.flags & V4L2_BUF_FLAG_KEYFRAME) ? "KEYFRAME " : "",
-            (buff.flags & V4L2_BUF_FLAG_PFRAME) ? "PFRAME " : "",
-            (buff.flags & V4L2_BUF_FLAG_BFRAME) ? "BFRAME " : "");
+        // INFO_MSG("Frame Metadata:");
+        // INFO_MSG("  - Buffer Index: %u", buff.index);
+        // INFO_MSG("  - Size: %u bytes", buff.bytesused);
+        // INFO_MSG("  - Timestamp: %ld.%06ld sec", buff.timestamp.tv_sec, buff.timestamp.tv_usec);
+        // INFO_MSG("  - Sequence: %u", buff.sequence);
+        // INFO_MSG("  - Flags: %s%s%s",
+        //     (buff.flags & V4L2_BUF_FLAG_KEYFRAME) ? "KEYFRAME " : "",
+        //     (buff.flags & V4L2_BUF_FLAG_PFRAME) ? "PFRAME " : "",
+        //     (buff.flags & V4L2_BUF_FLAG_BFRAME) ? "BFRAME " : "");
         frameHandler(Frame{.start = buffers[buff.index].start,
-            .length               = buff.bytesused,
-            .timestamp            = buff.timestamp});
+                .length           = buff.bytesused,
+                .timestamp        = buff.timestamp});
       } catch (const std::exception &e) {
         // Handle exceptions from frameHandler to prevent stream termination
         ERROR_MSG("Frame handler threw exception: %s", e.what());
@@ -229,19 +234,19 @@ void FrameForger::xioctl(int fd, int request, void *arg) {
     // If ioctl fails for any other reason, it's a fatal error for setup.
     char error_buf[256];
     snprintf(error_buf,
-        sizeof(error_buf),
-        "ioctl request 0x%x (%s) failed. Reason: %s",
-        (unsigned)request, // Cast to unsigned for comparison
-        request == (int)VIDIOC_QUERYCAP        ? "VIDIOC_QUERYCAP"
-            : request == (int)VIDIOC_S_FMT     ? "VIDIOC_S_FMT"
-            : request == (int)VIDIOC_REQBUFS   ? "VIDIOC_REQBUFS"
-            : request == (int)VIDIOC_QUERYBUF  ? "VIDIOC_QUERYBUF"
-            : request == (int)VIDIOC_QBUF      ? "VIDIOC_QBUF"
-            : request == (int)VIDIOC_DQBUF     ? "VIDIOC_DQBUF"
-            : request == (int)VIDIOC_STREAMON  ? "VIDIOC_STREAMON"
-            : request == (int)VIDIOC_STREAMOFF ? "VIDIOC_STREAMOFF"
-                                               : "Unknown",
-        strerror(errno));
+            sizeof(error_buf),
+            "ioctl request 0x%x (%s) failed. Reason: %s",
+            (unsigned)request, // Cast to unsigned for comparison
+            request == (int)VIDIOC_QUERYCAP            ? "VIDIOC_QUERYCAP"
+                    : request == (int)VIDIOC_S_FMT     ? "VIDIOC_S_FMT"
+                    : request == (int)VIDIOC_REQBUFS   ? "VIDIOC_REQBUFS"
+                    : request == (int)VIDIOC_QUERYBUF  ? "VIDIOC_QUERYBUF"
+                    : request == (int)VIDIOC_QBUF      ? "VIDIOC_QBUF"
+                    : request == (int)VIDIOC_DQBUF     ? "VIDIOC_DQBUF"
+                    : request == (int)VIDIOC_STREAMON  ? "VIDIOC_STREAMON"
+                    : request == (int)VIDIOC_STREAMOFF ? "VIDIOC_STREAMOFF"
+                                                       : "Unknown",
+            strerror(errno));
     throw std::runtime_error(error_buf);
   }
 }
@@ -254,9 +259,43 @@ void FrameForger::openDevice(std::string_view devicePath) {
   HIGH_MSG("Device opened successfully: %s", devicePath.data());
 }
 
-void FrameForger::initializeDevice(uint32_t format) {
+void FrameForger::findLowestResolution(uint32_t format) {
+  struct v4l2_frmsizeenum fsize;
+  fsize.pixel_format = format;
+  fsize.index        = 0;
+  uint32_t min_area  = -1; // Max uint32_t
+
+  INFO_MSG("Auto-detecting lowest resolution for format...");
+  while (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &fsize) == 0) {
+    if (fsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+      uint32_t area = fsize.discrete.width * fsize.discrete.height;
+      if (area < min_area) {
+        min_area = area;
+        width    = fsize.discrete.width;
+        height   = fsize.discrete.height;
+      }
+    }
+    fsize.index++;
+  }
+
+  if (min_area == (uint32_t)-1) {
+    throw std::runtime_error("Could not enumerate frame sizes for the given format.");
+  }
+  HIGH_MSG("Auto-selected lowest resolution: %ux%u", width, height);
+}
+
+void FrameForger::initializeDevice(uint32_t format, uint32_t fps) {
   struct v4l2_capability capa;
   xioctl(fd, VIDIOC_QUERYCAP, &capa);
+
+  if (!(capa.capabilities & V4L2_CAP_VIDEO_CAPTURE))
+    throw std::runtime_error("Device does not support video capture.");
+  if (!(capa.capabilities & V4L2_CAP_STREAMING))
+    throw std::runtime_error("Device does not support streaming I/O.");
+
+  if (width == 0 || height == 0) {
+    findLowestResolution(format);
+  }
 
   // Initialize format structure
   struct v4l2_format fmt  = {};
@@ -277,6 +316,18 @@ void FrameForger::initializeDevice(uint32_t format) {
   width  = fmt.fmt.pix.width;
   height = fmt.fmt.pix.height;
   HIGH_MSG("Format set to %ux%u", width, height);
+
+  struct v4l2_streamparm parm = {};
+  parm.type                   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  xioctl(fd, VIDIOC_G_PARM, &parm);
+  if (parm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME) {
+    parm.parm.capture.timeperframe.numerator   = 1;
+    parm.parm.capture.timeperframe.denominator = fps;
+    xioctl(fd, VIDIOC_S_PARM, &parm);
+    HIGH_MSG("FPS set to: %u", parm.parm.capture.timeperframe.denominator);
+  } else {
+    WARN_MSG("Device does not support setting FPS.");
+  }
 }
 
 void FrameForger::initializeBuffers(uint8_t reqBufferCount) {
@@ -304,7 +355,7 @@ void FrameForger::initializeBuffers(uint8_t reqBufferCount) {
 
     buffers[i].length = buff.length;
     buffers[i].start =
-        mmap(nullptr, buff.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buff.m.offset);
+            mmap(nullptr, buff.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buff.m.offset);
 
     if (buffers[i].start == MAP_FAILED) {
       throw std::runtime_error("Failed to map buffer to memory.");

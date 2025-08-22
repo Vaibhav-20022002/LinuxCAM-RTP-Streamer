@@ -1,6 +1,6 @@
 #pragma once
 
-#include "defines.hh"
+#include "../defines.hh"
 
 #if defined(__linux__)
 #include <linux/videodev2.h>
@@ -35,8 +35,13 @@ public:
   ///\param width The desired frame width.
   ///\param height The desired frame height.
   ///\param format The desired V4L2 pixel format (e.g., V4L2_PIX_FMT_MJPEG).
+  ///\param fps Desired frames-per-second; devices may ignore this if unsupported.
   ///\throws std::runtime_error if any critical initialization step fails.
-  FrameForger(std::string_view devicePath, uint32_t width, uint32_t height, uint32_t format);
+  FrameForger(std::string_view devicePath,
+          uint32_t             width,
+          uint32_t             height,
+          uint32_t             format,
+          uint32_t             fps);
 
   ///\brief Destructor. Automatically stops streaming, unmaps buffers, and closes the device.
   ~FrameForger();
@@ -85,6 +90,7 @@ private:
   int      fd = -1; ///< The file descriptor for the video device.
   uint32_t width;   ///< Configured frame width.
   uint32_t height;  ///< Configured frame height.
+  uint32_t fps;     ///< Desired frames per second (may be adjusted by driver)
 
   std::vector<BufferInfo> buffers;            ///< A vector holding info for each mmap'd buffer.
   std::atomic<bool>       isStreaming{false}; ///< Atomic flag to control the main loop.
@@ -104,9 +110,16 @@ private:
   void openDevice(std::string_view devicePath);
 
   ///\brief Queries device capabilities and sets the desired video format.
-  void initializeDevice(uint32_t format);
+  ///\param format pixel format to set
+  ///\param fps requested frames per second (driver may ignore)
+  void initializeDevice(uint32_t format, uint32_t fps);
+
+  ///\brief Enumerates framesizes and selects the lowest available for the given format.
+  ///\param format pixel format to enumerate
+  void findLowestResolution(uint32_t format);
 
   ///\brief Requests, queries, and memory-maps the V4L2 buffers.
+  ///\param reqBufferCount number of buffers to request (default tuned for low-memory systems)
   void initializeBuffers(uint8_t reqBufferCount = 4);
 
   ///\brief Queues all mapped buffers to make them available to the driver.
