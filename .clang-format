@@ -36,7 +36,7 @@ BraceWrapping:
 IndentCaseLabels:        true      # K&R indents switch cases same as code
 IndentGotoLabels:        false
 IndentPPDirectives:      None      # or 'AfterHash'
-ContinuationIndentWidth: 4         # indent for continuations
+ContinuationIndentWidth: 8         # indent for continuations
 
 # -------------------------------------------------------------------
 # Spaces — around operators, after keywords, inside parens
@@ -65,6 +65,7 @@ PointerAlignment:                 Right               # `int* p` vs `int *p`
 # -------------------------------------------------------------------
 AlignConsecutiveAssignments:    true
 AlignConsecutiveDeclarations:   true
+AlignConsecutiveMacros:         Consecutive
 AlignEscapedNewlines:           Left
 AlignOperands:                  false
 AlignTrailingComments:          true
@@ -97,7 +98,7 @@ IncludeCategories:
   - Regex:           '^".*\.h"'
     Priority:        2
 SortIncludes:                               true
-Standard:                                   Cpp11
+Standard:                                   Latest
 
 # -------------------------------------------------------------------
 # Other languages / files
